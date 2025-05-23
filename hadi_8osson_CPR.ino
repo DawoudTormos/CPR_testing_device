@@ -1,155 +1,166 @@
 #include "HX711.h"
 #include <LiquidCrystal_I2C.h>
 #include <Wire.h>
-// HX711 Pins
+
+// Pins
 #define DOUT1 3
 #define CLK1 2
-#define DOUT2 5
-#define DOUT3 7
-#define DOUT4 9
-
 #define red 10
 #define green 11
 
+// Constants
+const float SCALE_FACTOR = 67528.18;  
+const float CORRECT_DISPLACEMENT = 2.0;  // Target compression depth (cm)
+const int WINDOW_SIZE = 5;           // Moving average window size
+const float MIN_COMPRESSION_DEPTH = 0.6;  
+const int DISPLAY_INTERVAL = 5000;   // Update display every 2 seconds
+const int minBpm = 50, maxBpm = 80; // BPM limits
+
+// Objects
 HX711 scale1;
-HX711 scale2;
-HX711 scale3;
-HX711 scale4;
-
-// Replace after calibration
-float SCALE_FACTOR = 67528.18;
-
 LiquidCrystal_I2C lcd(0x27, 16, 2);
-int potpin = A0;
-int greenLED = 6;
-int redLED = 13;
-int a;
 
+// Variables
 int potValue = 0;
-int maxPotValue = 0 ;
+int maxPotValue = 0;
 int potOffset = -8;
-float f1=0;
-float maxf1=0;
-long unsigned int start = millis();
-float displacement=0;
-float correctDisplacement = 2;
+float f1 = 0;
+float maxf1 = 0;
+float displacement = 0;
+float maxdisplacement = 0;
+float displacements[WINDOW_SIZE] = {0};
+float smoothed = 0;
+int bpm = 100;
+int count = 0;
+unsigned long lastDisplayUpdate = 0;
 
-
-void setupLEDandSerial(){
-  Serial.begin(9600); // Start serial communication
-  Serial.println("Potentiometer to Displacement (cm)");
-  pinMode(red,OUTPUT);
-  pinMode(green,OUTPUT);
-}
-
-void setupLCD() {
-  lcd.init();
-  lcd.backlight();
-}
-void setupDisplacement() {
-  pinMode(potpin, INPUT);
-}
-
-void setupLoadCell() {
-  Serial.println("Platform Scale (4 Load Cells)");
-  // Initialize load cells
-  scale1.begin(DOUT1, CLK1);
-  // Set scale factors
-  scale1.set_scale(SCALE_FACTOR);
-  // Tare (zero out) all scales
-  Serial.println("Taring all load cells...");
-  scale1.tare();
-  Serial.println("Tare complete.");
-}
-
-void displayValuesLCD(){
-  lcd.clear(); // Clear previous value
-  lcd.setCursor(0, 0);
-  lcd.print("d: ");
-  lcd.print(displacement);
-  lcd.print(" w: ");
-  lcd.print(maxf1);
-  lcd.setCursor(0, 1);
-  lcd.print(a);
-}
-
+// New BPM variables
+bool state = false;
+bool prevState = false;
+unsigned long lastCompressionTime = 0;
 
 void setup() {
-  setupLEDandSerial();
-  setupLoadCell();
-  setupLCD();
-  setupDisplacement();
+  Serial.begin(9600);
+  pinMode(red, OUTPUT);
+  pinMode(green, OUTPUT);
+  
+  lcd.init();
+  lcd.backlight();
+  lcd.print("Initializing...");
+  
+  scale1.begin(DOUT1, CLK1, 64);  // 80SPS mode
+  scale1.wait_ready_timeout(50); 
+  scale1.set_scale(SCALE_FACTOR);
+  scale1.tare();
+  delay(500);
+  lcd.clear();
+}
+
+float average(const float* arr, size_t size) {
+  if (size == 0) return 0.0;
+  float sum = 0;
+  for (size_t i = 0; i < size; i++) {
+    sum += arr[i];
+  }
+  return sum / size;
+}
+
+void updateDisplay() {
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("D:");
+  lcd.print(maxdisplacement, 1);
+  lcd.print("cm W:");
+  lcd.print(maxf1, 1);
+  lcd.print("kg");
+  
+  lcd.setCursor(0, 1);
+  lcd.print("BPM:");
+  lcd.print(bpm);
+  lcd.print(" (");
+  lcd.print(count);
+  lcd.print(")");
+  
+  if (maxdisplacement > CORRECT_DISPLACEMENT && 
+      maxdisplacement < CORRECT_DISPLACEMENT + 0.5 && bpm <= maxBpm && bpm >= minBpm) {
+    digitalWrite(red, LOW);
+    digitalWrite(green, HIGH);
+    lcd.print("GOOD");
+  } else {
+    digitalWrite(red, HIGH);
+    digitalWrite(green, LOW);
+    lcd.print("PUSH!");
+  }
 }
 
 void loop() {
+  //delay(10);
+  // Read sensors
+  potValue = analogRead(A0) + potOffset;
+  f1 = scale1.get_units(1) * 4.0;  // Uncomment if using load cell
 
-  //measuring discplacement and press force. 
-  potValue = analogRead(potpin) + potOffset ; // Read analog input (0–1023)
-  f1 = scale1.get_units(1)*4.0;
-  /*
-  takes 85ms for the f1. 
-  potValue measurement time is minimal(<1ms)
-  */
+  // Track maximum values
+  if (potValue > maxPotValue) maxPotValue = potValue;
+  if (f1 > maxf1) maxf1 = f1;
   
-  //checking for a new max with tthe new measurement
-  if(potValue > maxPotValue){maxPotValue = potValue;}
-  if(f1 > maxf1){maxf1 = f1;}
-
-  if(millis() - start > 2000){
-
-
-      // anaolgue to distance cm
-      displacement = float(map(maxPotValue, 0, 290, 0, 600)) / 100;
-      /*
-      multiply 6 by 100 to be 600 then dividing by 100
-      Doing this to get a float value with the map function that work only with integers and returns integrs.
-      input is an int anyways.
-      Other solution could be not using the map function at all.
-      */
+  // Calculate displacement (0-6cm range)
+  float newVal = float(map(potValue, 0, 290, 0, 600)) / 100.0;
+    
+  
+  // State-based BPM detection
+  state = (newVal > MIN_COMPRESSION_DEPTH);
+  
+  // Detect rising edge (compression start)
+  if (!state && prevState) {
+    count++;
+    
+    if (lastCompressionTime != 0) {
+      unsigned long interval = millis() - lastCompressionTime;
       
-
-
-      // Display the result
-
-      Serial.println("\n\n\n........\n");
-
-      Serial.println("max analogue: "+ String(maxPotValue));
-      Serial.print("max displacement: ");
-      Serial.print(displacement, 2);
-      Serial.println(" cm");
-      Serial.print("Total Weight: ");
-      Serial.print(maxf1, 2);
-      Serial.println(" kg");
-
-      Serial.println("");
-
-
-
-      if(displacement > correctDisplacement && displacement < correctDisplacement + 0.5){
-
-          Serial.println("keep going");
-          digitalWrite(red,0);
-          digitalWrite(green,1);
-          displayValuesLCD();
-          lcd.setCursor(0, 1);
-          lcd.print("keep going");
-
-      }else{
-
-          Serial.println("Error! push harder");
-          digitalWrite(red,1);
-          digitalWrite(green,0);
-          displayValuesLCD();
-          lcd.setCursor(0, 1);
-          lcd.print("Error! push harder");
-
+      // Valid BPM range (20-300 BPM)
+      if (interval > 200 && interval < 3000) {
+        bpm = 60000 / interval;  // Convert ms interval to BPM
       }
-      Serial.println("");
-      maxPotValue=0;
-      maxf1= 0;
-      start = millis();
+    }
+    lastCompressionTime = millis();
+    
+
+     maxdisplacement = float(map(maxPotValue, 0, 290, 0, 600)) / 100.0;
+    
+    Serial.print("Displacement: ");
+    Serial.print(maxdisplacement, 3);
+    Serial.print(" cm | Force: ");
+    Serial.print(maxf1, 3);
+    Serial.print(" kg | rate: ");
+    Serial.print(bpm);
+    Serial.print(" | Count: ");
+    Serial.println(count);
+    
+    updateDisplay();
+    
+    // Reset trackers
+    maxPotValue = 0;
+    maxdisplacement=0;
+    maxf1 = 0;
+
+    // Brief LED feedback
 
   }
-  
+  prevState = state;
 
+  // Periodic display update
+  if (millis() - lastDisplayUpdate >= DISPLAY_INTERVAL  && millis() - lastCompressionTime > 10000 ) {
+    maxPotValue=0;
+    maxdisplacement =0;
+    Serial.println("NO Compression: ");
+    Serial.print("Displacement: ");
+    Serial.print(maxdisplacement, 3);
+    Serial.print(" cm | Force: ");
+    Serial.print(maxf1, 3);
+    Serial.print(" kg \n");
+    maxdisplacement=0;
+    maxf1 = 0;
+       lastDisplayUpdate = millis();
+
+  }
 }
