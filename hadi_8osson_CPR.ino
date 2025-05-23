@@ -3,7 +3,8 @@
 #include <Wire.h>
 
 // Pins
-#define DOUT1 3
+#define DOUT1 5
+#define DOUT2 3
 #define CLK1 2
 #define red 10
 #define green 11
@@ -14,10 +15,11 @@ const float CORRECT_DISPLACEMENT = 2.0;  // Target compression depth (cm)
 const int WINDOW_SIZE = 5;           // Moving average window size
 const float MIN_COMPRESSION_DEPTH = 0.6;  
 const int DISPLAY_INTERVAL = 5000;   // Update display every 2 seconds
-const int minBpm = 50, maxBpm = 80; // BPM limits
+const int minBpm = 20, maxBpm = 150; // BPM limits
 
 // Objects
 HX711 scale1;
+HX711 scale2;
 LiquidCrystal_I2C lcd(0x27, 16, 2);
 
 // Variables
@@ -25,6 +27,7 @@ int potValue = 0;
 int maxPotValue = 0;
 int potOffset = -8;
 float f1 = 0;
+float f2 = 0;
 float maxf1 = 0;
 float displacement = 0;
 float maxdisplacement = 0;
@@ -50,8 +53,13 @@ void setup() {
   
   scale1.begin(DOUT1, CLK1, 64);  // 80SPS mode
   scale1.wait_ready_timeout(50); 
-  scale1.set_scale(SCALE_FACTOR);
   scale1.tare();
+  scale1.set_scale(SCALE_FACTOR);
+
+  scale2.begin(DOUT2, CLK1);  
+  scale2.set_scale(SCALE_FACTOR);
+  scale2.tare();
+
   delay(500);
   lcd.clear();
 }
@@ -75,7 +83,7 @@ void updateDisplay() {
   lcd.print("kg");
   
   lcd.setCursor(0, 1);
-  lcd.print("BPM:");
+  lcd.print("r:");
   lcd.print(bpm);
   lcd.print(" (");
   lcd.print(count);
@@ -129,7 +137,7 @@ void loop() {
     
     Serial.print("Displacement: ");
     Serial.print(maxdisplacement, 3);
-    Serial.print(" cm | Force: ");
+    Serial.print(" cm | MaxForce: ");
     Serial.print(maxf1, 3);
     Serial.print(" kg | rate: ");
     Serial.print(bpm);
@@ -150,17 +158,20 @@ void loop() {
 
   // Periodic display update
   if (millis() - lastDisplayUpdate >= DISPLAY_INTERVAL  && millis() - lastCompressionTime > 10000 ) {
+    f2 = scale2.get_units(10) * 4.0 * 0.6849;  // Uncomment if using load cell
+
     maxPotValue=0;
-    maxdisplacement =0;
+    digitalWrite(red, LOW);
+    digitalWrite(green, LOW);
     Serial.println("NO Compression: ");
     Serial.print("Displacement: ");
     Serial.print(maxdisplacement, 3);
-    Serial.print(" cm | Force: ");
-    Serial.print(maxf1, 3);
+    Serial.print(" cm Force: ");
+    Serial.print(f2, 3);
     Serial.print(" kg \n");
     maxdisplacement=0;
     maxf1 = 0;
-       lastDisplayUpdate = millis();
+    lastDisplayUpdate = millis();
 
   }
 }
